@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Model-Mediapipe Tracker</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #222; font-family: sans-serif; touch-action: none; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; touch-action: none; }
+        
+        #ui-layer {
+            position: absolute; top: 10px; left: 10px; z-index: 10;
+            background: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 8px; color: white;
+            max-width: 50vw; box-sizing: border-box;
+        }
+        select, button { padding: 8px; margin-top: 10px; width: 100%; cursor: pointer; }
+        
+        #webcam-container {
+            position: absolute; top: 10px; right: 10px; z-index: 10;
+            width: 240px; height: 180px; border: 2px solid white; border-radius: 8px; overflow: hidden;
+        }
+        .input_video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        .output_canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+
+        #mobile-controls {
+            position: absolute; bottom: 20px; left: 0; width: 100vw; z-index: 10;
+            display: flex; justify-content: space-between; align-items: flex-end; padding: 0 20px;
+            box-sizing: border-box; pointer-events: none;
+        }
+        
+        #joystick-zone {
+            width: 140px; height: 140px; background: rgba(255,255,255,0.2); border-radius: 50%;
+            position: relative; pointer-events: auto; display: none; touch-action: none;
+        }
+        #joystick-knob {
+            width: 60px; height: 60px; background: rgba(255,255,255,0.5); border-radius: 50%;
+            position: absolute; top: 40px; left: 40px; touch-action: none; pointer-events: none;
+        }
+
+        #action-buttons {
+            display: none; gap: 10px; pointer-events: auto; touch-action: none;
+        }
+        .action-btn {
+            width: 60px; height: 60px; border-radius: 50%; background: rgba(0,0,0,0.5); color: white;
+            border: 2px solid white; font-size: 12px; font-weight: bold; cursor: pointer; touch-action: none;
+        }
+
+        @media (max-width: 768px) {
+            #webcam-container { width: 120px; height: 90px; }
+            #joystick-zone { display: block; }
+            #action-buttons { display: flex; }
+            #ui-layer { font-size: 14px; padding: 10px; }
+            select, button { padding: 6px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- UI Overlay -->
+    <div id="ui-layer">
+        <h3>Character Select</h3>
+        <select id="model-select">
+            <option value="models/Bluey_fixed_1.glb">Bluey</option>
+            <option value="models/Bingo_fixed_1.glb">Bingo</option>
+            <option value="models/kuromi_fixed_1.glb">Kuromi</option>
+            <option value="models/Pompompurin_fixed_1.glb">Pompompurin</option>
+        </select>
+        <button id="btn-wave">Trigger Wave Clip</button>
+    </div>
+
+    <!-- MediaPipe Webcam Feed -->
+    <div id="webcam-container">
+        <video class="input_video" autoplay playsinline></video>
+        <canvas class="output_canvas" width="240" height="180"></canvas>
+    </div>
+
+    <!-- Mobile Controls -->
+    <div id="mobile-controls">
+        <div id="joystick-zone">
+            <div id="joystick-knob"></div>
+        </div>
+        <div id="action-buttons">
+            <button class="action-btn" id="btn-jump">Jump</button>
+            <button class="action-btn" id="btn-m-wave">Wave</button>
+            <button class="action-btn" id="btn-dance">Dance</button>
+        </div>
+    </div>
+
+    <!-- Three.js Canvas -->
+    <div id="canvas-container"></div>
+
+    <!-- Dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    
+    <!-- Engine Files -->
+    <script type="module">
+        import { RigCharacter, CLIPS } from './rig_engine.js';
+        import { applyCalibration } from './apply_calibration.js';
+
+        // Add additional clips as defined in the handoff
+        CLIPS.excited = function(rig, t, { intensity = 1 } = {}) {
+            const s = rig.semantic;
+            const bounce = Math.abs(Math.sin(t * 8)) * intensity;
+            rig._driveHips(bounce * 0.03, 0, 0);
+            if (s.spine[0]) rig.pose(s.spine[0], -bounce * 0.08, 0, 0);
+            rig.pose(s.head, -0.1 + bounce * 0.05, Math.sin(t * 4) * 0.1, 0);
+            rig.pose(s.upperArmL, -0.3, 0, -0.3 + Math.sin(t * 6) * 0.4);
+            rig.pose(s.upperArmR, -0.3, 0, 0.3 - Math.sin(t * 6) * 0.4);
+            rig.poseLocal(s.forearmL, 1.0 + bounce * 0.3, 0, 0);
+            rig.poseLocal(s.forearmR, 1.0 + bounce * 0.3, 0, 0);
+            if(rig.collision) rig.collision.suppress(0.2);
+            rig.morph('Mouth Smile', 1.0);
+            rig.viseme('A', bounce * 0.5);
+            rig.morph('BrowHappy', 0.9);
+            rig.blink(0);
+            rig.pose(s.thighL, -bounce * 0.15, 0, 0);
+            rig.pose(s.thighR, -bounce * 0.15, 0, 0);
+            if (s.shinL) rig._poseMapped(s.shinL, rig.legAxes?.kneeL, bounce * 0.3 + 0.1);
+            if (s.shinR) rig._poseMapped(s.shinR, rig.legAxes?.kneeR, bounce * 0.3 + 0.1);
+            if(s.tail) s.tail.forEach((n, i) => rig.pose(n, 0, Math.sin(t * 10 - i * 0.3) * 0.2, 0));
+        };
+
+        CLIPS.sad = function(rig, t, { intensity = 1 } = {}) {
+            const s = rig.semantic;
+            rig._driveHips(-0.02 * intensity, 0, 0);
+            if (s.spine[0]) rig.pose(s.spine[0], 0.2 * intensity, 0, 0);
+            rig.pose(s.head, 0.25 * intensity + Math.sin(t * 0.7) * 0.02, 0, Math.sin(t * 0.5) * 0.03);
+            const armDown = rig.armDownAuto ?? 1.4;
+            rig.pose(s.upperArmL, 0.1, 0, -armDown - 0.2);
+            rig.pose(s.upperArmR, 0.1, 0, armDown + 0.2);
+            rig.poseLocal(s.forearmL, 0.15, 0, 0);
+            rig.poseLocal(s.forearmR, 0.15, 0, 0);
+            rig.morph('BrowSad', 0.8 * intensity);
+            rig.morph('Mouth Smile', 0);
+            rig.viseme('U', 0.2);
+            const bt = t % 5.0, b = bt < 0.5 ? Math.sin(bt / 0.5 * Math.PI) : 0;
+            rig.blink(b);
+            if(s.tail) s.tail.forEach((n, i) => rig.pose(n, 0.1, Math.sin(t * 1.5 - i * 0.7) * 0.04, 0));
+        };
+
+        // --- 1. Three.js Setup ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 1.5, 4);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        container.appendChild(renderer.domElement);
+
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+        hemiLight.position.set(0, 20, 0);
+        scene.add(hemiLight);
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(3, 10, 10);
+        scene.add(dirLight);
+
+        // --- 2. Model Loading Logic ---
+        let currentRig = null;
+        let currentModel = null;
+        const loader = new THREE.GLTFLoader();
+
+        function loadModel(filename) {
+            if (currentModel) scene.remove(currentModel);
+            
+            loader.load(filename, (gltf) => {
+                currentModel = gltf.scene;
+                
+                RigCharacter.normalize(currentModel, THREE, 2.2);
+                
+                currentRig = new RigCharacter(currentModel, THREE);
+                if (gltf.parser.json.extras && gltf.parser.json.extras.calibration) {
+                    applyCalibration(gltf, currentRig);
+                }
+                currentRig.play('idle'); 
+                scene.add(currentModel);
+            });
+        }
+
+        document.getElementById('model-select').addEventListener('change', (e) => loadModel(e.target.value));
+        document.getElementById('btn-wave').addEventListener('click', () => { if (currentRig) currentRig.play('wave'); });
+        document.getElementById('btn-jump').addEventListener('click', () => { if (currentRig) currentRig.play('jump'); });
+        document.getElementById('btn-m-wave').addEventListener('click', () => { if (currentRig) currentRig.play('wave'); });
+        document.getElementById('btn-dance').addEventListener('click', () => { if (currentRig) currentRig.play('dance'); });
+
+        loadModel('models/Bluey_fixed_1.glb');
+
+        // --- Handoff Mirroring Logics ---
+        function driveRigFromLandmarks(rig, pose) {
+            if (!pose) return;
+            const s = rig.semantic;
+
+            const nose = pose[0], leftEar = pose[7], rightEar = pose[8];
+            const leftShoulder = pose[11], rightShoulder = pose[12];
+
+            // Head yaw
+            if (leftEar && rightEar && nose) {
+                const earMidX = (leftEar.x + rightEar.x) / 2;
+                const yaw = (nose.x - earMidX) * 4;
+                const pitch = (nose.y - (leftEar.y + rightEar.y) / 2) * 3;
+                const roll = Math.atan2(rightEar.y - leftEar.y, rightEar.x - leftEar.x);
+                rig.pose(s.head, pitch, -yaw, -roll);
+            }
+
+            // Spine
+            const leftHip = pose[23], rightHip = pose[24];
+            if (leftShoulder && rightShoulder && leftHip && rightHip) {
+                const shoulderMid = { x: (leftShoulder.x + rightShoulder.x) / 2, y: (leftShoulder.y + rightShoulder.y) / 2 };
+                const hipMid = { x: (leftHip.x + rightHip.x) / 2, y: (leftHip.y + rightHip.y) / 2 };
+                const splineLean = (shoulderMid.x - hipMid.x) * 3;
+                const splineBend = (shoulderMid.y - hipMid.y - 0.3) * 2;
+                if (s.spine && s.spine[0]) rig.pose(s.spine[0], splineBend, 0, -splineLean);
+            }
+
+            // Arms
+            driveArm(rig, 'L', pose[11], pose[13], pose[15]);
+            driveArm(rig, 'R', pose[12], pose[14], pose[16]);
+            
+            // Legs (if standing full body)
+            if (pose[23]?.visibility > 0.5 && pose[25]?.visibility > 0.5) {
+                driveLeg(rig, 'L', pose[23], pose[25], pose[27]);
+                driveLeg(rig, 'R', pose[24], pose[26], pose[28]);
+            }
+        }
+
+        function driveArm(rig, side, shoulder, elbow, wrist) {
+            if (!shoulder || !elbow || !wrist || shoulder.visibility < 0.5) return;
+            const s = rig.semantic;
+            const sign = side === 'L' ? -1 : 1;
+            const upName = s['upperArm' + side];
+            const foName = s['forearm' + side];
+
+            const dx = elbow.x - shoulder.x;
+            const dy = elbow.y - shoulder.y;
+            const dz = (elbow.z - shoulder.z) * 2;
+            
+            const pitch = -dy * 3;
+            const roll = -dx * 3 * sign;
+            const yaw = dz * 2;
+
+            rig.pose(upName, pitch, yaw, roll);
+
+            const ux = elbow.x - shoulder.x, uy = elbow.y - shoulder.y;
+            const fx = wrist.x - elbow.x, fy = wrist.y - elbow.y;
+            const dot = ux * fx + uy * fy;
+            const cross = ux * fy - uy * fx;
+            const elbowAngle = Math.max(0, Math.atan2(Math.abs(cross), dot));
+            rig.poseLocal(foName, elbowAngle, 0, 0);
+        }
+
+        function driveLeg(rig, side, hip, knee, ankle) {
+            if (!hip || !knee) return;
+            const s = rig.semantic;
+            const dx = knee.x - hip.x;
+            const dy = knee.y - hip.y;
+            const thighPitch = -(dy - 0.25) * 3;
+            if (s['thigh' + side]) rig.pose(s['thigh' + side], thighPitch, 0, 0);
+
+            if (ankle && s['shin' + side]) {
+                const ux = knee.x - hip.x, uy = knee.y - hip.y;
+                const lx = ankle.x - knee.x, ly = ankle.y - knee.y;
+                const dot = ux * lx + uy * ly;
+                const cross = ux * ly - uy * lx;
+                const kneeBend = Math.max(0, Math.atan2(Math.abs(cross), dot));
+                rig._poseMapped(s['shin' + side], rig.legAxes?.['knee' + side], kneeBend);
+            }
+        }
+
+        function detectGesture(pose) {
+            if (!pose) return null;
+            const lw = pose[15], rw = pose[16];
+            const ls = pose[11], rs = pose[12];
+            
+            if (rw && rs && rw.y < rs.y - 0.15 && rw.visibility > 0.7) {
+                return 'wave';
+            }
+            if (lw && rw && ls && rs && lw.y < ls.y - 0.1 && rw.y < rs.y - 0.1) {
+                return 'excited';
+            }
+            if (lw && rw && ls && rs && Math.abs(lw.x - rs.x) < 0.1 && Math.abs(rw.x - ls.x) < 0.1) {
+                return 'sad';
+            }
+            return null;
+        }
+
+        // --- 3. MediaPipe Integration ---
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const canvasElement = document.getElementsByClassName('output_canvas')[0];
+        const canvasCtx = canvasElement.getContext('2d');
+
+        let currentGesture = null;
+        let gestureTimeout = null;
+
+        let smoothedLandmarks = null;
+        const smoothingFactor = 0.7;
+
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.poseLandmarks && currentRig) {
+                const lm = results.poseLandmarks;
+                
+                // Exponential smoothing
+                if (!smoothedLandmarks) {
+                    smoothedLandmarks = lm.map(l => ({x: l.x, y: l.y, z: l.z, visibility: l.visibility}));
+                } else {
+                    for (let i = 0; i < lm.length; i++) {
+                        smoothedLandmarks[i].x = smoothedLandmarks[i].x * smoothingFactor + lm[i].x * (1 - smoothingFactor);
+                        smoothedLandmarks[i].y = smoothedLandmarks[i].y * smoothingFactor + lm[i].y * (1 - smoothingFactor);
+                        smoothedLandmarks[i].z = smoothedLandmarks[i].z * smoothingFactor + lm[i].z * (1 - smoothingFactor);
+                        smoothedLandmarks[i].visibility = lm[i].visibility;
+                    }
+                }
+
+                const sLm = smoothedLandmarks;
+
+                const gesture = detectGesture(sLm);
+                if (gesture && gesture !== currentGesture) {
+                    currentRig.play(gesture);
+                    currentGesture = gesture;
+                    if(gestureTimeout) clearTimeout(gestureTimeout);
+                    gestureTimeout = setTimeout(() => { currentGesture = null; }, 2000);
+                }
+
+                if (!currentGesture) {
+                    driveRigFromLandmarks(currentRig, sLm);
+                } else {
+                    // Hybrid: Let clip drive most things but head still tracking user
+                    const nose = sLm[0], leftEar = sLm[7], rightEar = sLm[8];
+                    if (leftEar && rightEar && nose) {
+                        const earMidX = (leftEar.x + rightEar.x) / 2;
+                        const yaw = (nose.x - earMidX) * 4;
+                        const pitch = (nose.y - (leftEar.y + rightEar.y) / 2) * 3;
+                        const roll = Math.atan2(rightEar.y - leftEar.y, rightEar.x - leftEar.x);
+                        currentRig.pose(currentRig.semantic.head, pitch, -yaw, -roll);
+                    }
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        const pose = new Pose({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`});
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        pose.onResults(onResults);
+
+        const cameraFeed = new Camera(videoElement, {
+            onFrame: async () => { await pose.send({image: videoElement}); },
+            width: 480, height: 360,
+            facingMode: 'user'
+        });
+        cameraFeed.start();
+
+        // --- 4. Game Loop ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            if (currentRig) currentRig.update(dt);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
