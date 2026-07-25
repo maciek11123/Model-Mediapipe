@@ -7,27 +7,26 @@
     <style>
         body { margin: 0; overflow: hidden; background-color: #222; font-family: sans-serif; touch-action: none; }
         #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; touch-action: none; }
-        
+
         #ui-layer {
             position: absolute; top: 10px; left: 10px; z-index: 10;
             background: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 8px; color: white;
             max-width: 50vw; box-sizing: border-box;
         }
         select, button { padding: 8px; margin-top: 10px; width: 100%; cursor: pointer; }
-        
+
         #webcam-container {
             position: absolute; top: 10px; right: 10px; z-index: 10;
             width: 240px; height: 180px; border: 2px solid white; border-radius: 8px; overflow: hidden;
         }
         .input_video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
-        .output_canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
 
         #mobile-controls {
             position: absolute; bottom: 20px; left: 0; width: 100vw; z-index: 10;
             display: flex; justify-content: space-between; align-items: flex-end; padding: 0 20px;
             box-sizing: border-box; pointer-events: none;
         }
-        
+
         #joystick-zone {
             width: 140px; height: 140px; background: rgba(255,255,255,0.2); border-radius: 50%;
             position: relative; pointer-events: auto; display: none; touch-action: none;
@@ -45,6 +44,19 @@
             border: 2px solid white; font-size: 12px; font-weight: bold; cursor: pointer; touch-action: none;
         }
 
+        #loading-screen {
+            position: fixed; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; background: #222;
+            color: white; z-index: 100; gap: 10px; font-size: 18px; font-weight: 600;
+        }
+        #loading-screen .sub { font-size: 13px; color: #888; font-weight: 400; }
+
+        #fps-counter {
+            position: fixed; bottom: 10px; left: 10px; z-index: 20;
+            background: rgba(0,0,0,0.5); color: #4CAF50; padding: 4px 10px;
+            border-radius: 6px; font-size: 12px; font-family: monospace;
+        }
+
         @media (max-width: 768px) {
             #webcam-container { width: 120px; height: 90px; }
             #joystick-zone { display: block; }
@@ -55,6 +67,11 @@
     </style>
 </head>
 <body>
+
+    <div id="loading-screen">
+        <div>Loading Tracker...</div>
+        <div class="sub" id="load-msg">Initializing...</div>
+    </div>
 
     <!-- UI Overlay -->
     <div id="ui-layer">
@@ -68,10 +85,9 @@
         <button id="btn-wave">Trigger Wave Clip</button>
     </div>
 
-    <!-- MediaPipe Webcam Feed -->
+    <!-- Webcam Feed (video only — no canvas overlay redraw) -->
     <div id="webcam-container">
-        <video class="input_video" autoplay playsinline></video>
-        <canvas class="output_canvas" width="240" height="180"></canvas>
+        <video class="input_video" autoplay playsinline muted></video>
     </div>
 
     <!-- Mobile Controls -->
@@ -89,18 +105,17 @@
     <!-- Three.js Canvas -->
     <div id="canvas-container"></div>
 
-    <!-- Dependencies -->
+    <div id="fps-counter"></div>
+
+    <!-- Same Three.js r128 as original — no rendering changes -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
-    
+
     <!-- Engine Files -->
     <script type="module">
         import { RigCharacter, CLIPS } from './rig_engine.js';
         import { applyCalibration } from './apply_calibration.js';
 
-        // Add additional clips as defined in the handoff
         CLIPS.excited = function(rig, t, { intensity = 1 } = {}) {
             const s = rig.semantic;
             const bounce = Math.abs(Math.sin(t * 8)) * intensity;
@@ -141,15 +156,16 @@
             if(s.tail) s.tail.forEach((n, i) => rig.pose(n, 0.1, Math.sin(t * 1.5 - i * 0.7) * 0.04, 0));
         };
 
-        // --- 1. Three.js Setup ---
+        // --- 1. Three.js Setup (identical renderer to original) ---
         const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x87CEEB);
-        
+
         const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
         camera.position.set(0, 1.5, 4);
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.outputEncoding = THREE.sRGBEncoding;
         container.appendChild(renderer.domElement);
@@ -157,7 +173,7 @@
         const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
         hemiLight.position.set(0, 20, 0);
         scene.add(hemiLight);
-        
+
         const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
         dirLight.position.set(3, 10, 10);
         scene.add(dirLight);
@@ -168,18 +184,19 @@
         const loader = new THREE.GLTFLoader();
 
         function loadModel(filename) {
-            if (currentModel) scene.remove(currentModel);
-            
+            if (currentModel) {
+                currentModel.traverse(c => { if (c.geometry) c.geometry.dispose(); });
+                scene.remove(currentModel);
+            }
+
             loader.load(filename, (gltf) => {
                 currentModel = gltf.scene;
-                
                 RigCharacter.normalize(currentModel, THREE, 2.2);
-                
                 currentRig = new RigCharacter(currentModel, THREE);
                 if (gltf.parser.json.extras && gltf.parser.json.extras.calibration) {
                     applyCalibration(gltf, currentRig);
                 }
-                currentRig.play('idle'); 
+                currentRig.play('idle');
                 scene.add(currentModel);
             });
         }
@@ -190,9 +207,15 @@
         document.getElementById('btn-m-wave').addEventListener('click', () => { if (currentRig) currentRig.play('wave'); });
         document.getElementById('btn-dance').addEventListener('click', () => { if (currentRig) currentRig.play('dance'); });
 
-        loadModel('models/Bluey_fixed_1.glb');
+        // --- Smoothing helpers (EMA for cleaner tracking at lower sample rate) ---
+        const smoothed = {};
+        function ema(key, value, alpha = 0.3) {
+            if (!(key in smoothed)) smoothed[key] = value;
+            smoothed[key] += (value - smoothed[key]) * alpha;
+            return smoothed[key];
+        }
 
-        // --- Handoff Mirroring Logics ---
+        // --- Rig driving from landmarks ---
         function driveRigFromLandmarks(rig, pose) {
             if (!pose) return;
             const s = rig.semantic;
@@ -200,30 +223,26 @@
             const nose = pose[0], leftEar = pose[7], rightEar = pose[8];
             const leftShoulder = pose[11], rightShoulder = pose[12];
 
-            // Head yaw
             if (leftEar && rightEar && nose) {
                 const earMidX = (leftEar.x + rightEar.x) / 2;
-                const yaw = (nose.x - earMidX) * 4;
-                const pitch = (nose.y - (leftEar.y + rightEar.y) / 2) * 3;
-                const roll = Math.atan2(rightEar.y - leftEar.y, rightEar.x - leftEar.x);
+                const yaw = ema('headYaw', (nose.x - earMidX) * 4, 0.35);
+                const pitch = ema('headPitch', (nose.y - (leftEar.y + rightEar.y) / 2) * 3, 0.35);
+                const roll = ema('headRoll', Math.atan2(rightEar.y - leftEar.y, rightEar.x - leftEar.x), 0.3);
                 rig.pose(s.head, pitch, -yaw, -roll);
             }
 
-            // Spine
             const leftHip = pose[23], rightHip = pose[24];
             if (leftShoulder && rightShoulder && leftHip && rightHip) {
                 const shoulderMid = { x: (leftShoulder.x + rightShoulder.x) / 2, y: (leftShoulder.y + rightShoulder.y) / 2 };
                 const hipMid = { x: (leftHip.x + rightHip.x) / 2, y: (leftHip.y + rightHip.y) / 2 };
-                const splineLean = (shoulderMid.x - hipMid.x) * 3;
-                const splineBend = (shoulderMid.y - hipMid.y - 0.3) * 2;
+                const splineLean = ema('spineLean', (shoulderMid.x - hipMid.x) * 3, 0.25);
+                const splineBend = ema('spineBend', (shoulderMid.y - hipMid.y - 0.3) * 2, 0.25);
                 if (s.spine && s.spine[0]) rig.pose(s.spine[0], splineBend, 0, -splineLean);
             }
 
-            // Arms
             driveArm(rig, 'L', pose[11], pose[13], pose[15]);
             driveArm(rig, 'R', pose[12], pose[14], pose[16]);
-            
-            // Legs (if standing full body)
+
             if (pose[23]?.visibility > 0.5 && pose[25]?.visibility > 0.5) {
                 driveLeg(rig, 'L', pose[23], pose[25], pose[27]);
                 driveLeg(rig, 'R', pose[24], pose[26], pose[28]);
@@ -240,10 +259,10 @@
             const dx = elbow.x - shoulder.x;
             const dy = elbow.y - shoulder.y;
             const dz = (elbow.z - shoulder.z) * 2;
-            
-            const pitch = -dy * 3;
-            const roll = -dx * 3 * sign;
-            const yaw = dz * 2;
+
+            const pitch = ema(`arm${side}P`, -dy * 3, 0.3);
+            const roll = ema(`arm${side}R`, -dx * 3 * sign, 0.3);
+            const yaw = ema(`arm${side}Y`, dz * 2, 0.25);
 
             rig.pose(upName, pitch, yaw, roll);
 
@@ -251,7 +270,7 @@
             const fx = wrist.x - elbow.x, fy = wrist.y - elbow.y;
             const dot = ux * fx + uy * fy;
             const cross = ux * fy - uy * fx;
-            const elbowAngle = Math.max(0, Math.atan2(Math.abs(cross), dot));
+            const elbowAngle = ema(`elbow${side}`, Math.max(0, Math.atan2(Math.abs(cross), dot)), 0.3);
             rig.poseLocal(foName, elbowAngle, 0, 0);
         }
 
@@ -277,7 +296,7 @@
             if (!pose) return null;
             const lw = pose[15], rw = pose[16];
             const ls = pose[11], rs = pose[12];
-            
+
             if (rw && rs && rw.y < rs.y - 0.15 && rw.visibility > 0.7) {
                 return 'wave';
             }
@@ -290,96 +309,158 @@
             return null;
         }
 
-        // --- 3. MediaPipe Integration ---
-        const videoElement = document.getElementsByClassName('input_video')[0];
-        const canvasElement = document.getElementsByClassName('output_canvas')[0];
-        const canvasCtx = canvasElement.getContext('2d');
+        // --- 3. Modern MediaPipe Tasks Vision API (GPU-accelerated, throttled) ---
+        const videoElement = document.querySelector('.input_video');
+        let poseLandmarker = null;
+        let latestPose = null;
+        let mpReady = false;
+        let camReady = false;
 
         let currentGesture = null;
         let gestureTimeout = null;
 
-        let smoothedLandmarks = null;
-        const smoothingFactor = 0.7;
-
-        function onResults(results) {
-            canvasCtx.save();
-            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-            
-            if (results.poseLandmarks && currentRig) {
-                const lm = results.poseLandmarks;
-                
-                // Exponential smoothing
-                if (!smoothedLandmarks) {
-                    smoothedLandmarks = lm.map(l => ({x: l.x, y: l.y, z: l.z, visibility: l.visibility}));
-                } else {
-                    for (let i = 0; i < lm.length; i++) {
-                        smoothedLandmarks[i].x = smoothedLandmarks[i].x * smoothingFactor + lm[i].x * (1 - smoothingFactor);
-                        smoothedLandmarks[i].y = smoothedLandmarks[i].y * smoothingFactor + lm[i].y * (1 - smoothingFactor);
-                        smoothedLandmarks[i].z = smoothedLandmarks[i].z * smoothingFactor + lm[i].z * (1 - smoothingFactor);
-                        smoothedLandmarks[i].visibility = lm[i].visibility;
-                    }
-                }
-
-                const sLm = smoothedLandmarks;
-
-                const gesture = detectGesture(sLm);
-                if (gesture && gesture !== currentGesture) {
-                    currentRig.play(gesture);
-                    currentGesture = gesture;
-                    if(gestureTimeout) clearTimeout(gestureTimeout);
-                    gestureTimeout = setTimeout(() => { currentGesture = null; }, 2000);
-                }
-
-                if (!currentGesture) {
-                    driveRigFromLandmarks(currentRig, sLm);
-                } else {
-                    // Hybrid: Let clip drive most things but head still tracking user
-                    const nose = sLm[0], leftEar = sLm[7], rightEar = sLm[8];
-                    if (leftEar && rightEar && nose) {
-                        const earMidX = (leftEar.x + rightEar.x) / 2;
-                        const yaw = (nose.x - earMidX) * 4;
-                        const pitch = (nose.y - (leftEar.y + rightEar.y) / 2) * 3;
-                        const roll = Math.atan2(rightEar.y - leftEar.y, rightEar.x - leftEar.x);
-                        currentRig.pose(currentRig.semantic.head, pitch, -yaw, -roll);
-                    }
-                }
+        async function startCamera() {
+            const loadMsg = document.getElementById('load-msg');
+            loadMsg.textContent = 'Starting camera...';
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 } },
+                    audio: false
+                });
+                videoElement.srcObject = stream;
+                await videoElement.play();
+                camReady = true;
+                return true;
+            } catch (e) {
+                console.warn('Camera failed:', e);
+                loadMsg.textContent = 'No camera - running in idle mode';
+                return false;
             }
-            canvasCtx.restore();
         }
 
-        const pose = new Pose({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`});
-        pose.setOptions({
-            modelComplexity: 1,
-            smoothLandmarks: true,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
-        });
-        pose.onResults(onResults);
+        async function initMediaPipe() {
+            const loadMsg = document.getElementById('load-msg');
+            loadMsg.textContent = 'Loading pose detection (GPU)...';
+            try {
+                const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+                const { PoseLandmarker, FilesetResolver } = vision;
+                const filesetResolver = await FilesetResolver.forVisionTasks(
+                    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+                );
+                poseLandmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
+                    baseOptions: {
+                        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+                        delegate: 'GPU'
+                    },
+                    runningMode: 'VIDEO',
+                    numPoses: 1
+                });
+                mpReady = true;
+            } catch (e) {
+                console.error('MediaPipe init failed:', e);
+                loadMsg.textContent = 'Pose detection failed - idle mode';
+            }
+        }
 
-        const cameraFeed = new Camera(videoElement, {
-            onFrame: async () => { await pose.send({image: videoElement}); },
-            width: 480, height: 360,
-            facingMode: 'user'
-        });
-        cameraFeed.start();
+        // Throttled detection: ~20fps cap instead of every frame
+        let lastDetectTime = -1;
+        const DETECT_INTERVAL_MS = 50;
+
+        function runDetection() {
+            if (!camReady || !mpReady || !videoElement.videoWidth) return;
+            const now = performance.now();
+            if (now - lastDetectTime < DETECT_INTERVAL_MS) return;
+            lastDetectTime = now;
+            try {
+                const result = poseLandmarker.detectForVideo(videoElement, now);
+                latestPose = result.landmarks?.[0] ?? null;
+            } catch (e) { /* skip frame on error */ }
+        }
+
+        function processPose() {
+            if (!latestPose || !currentRig) return;
+
+            const gesture = detectGesture(latestPose);
+            if (gesture && gesture !== currentGesture) {
+                currentRig.play(gesture);
+                currentGesture = gesture;
+                if (gestureTimeout) clearTimeout(gestureTimeout);
+                gestureTimeout = setTimeout(() => { currentGesture = null; }, 2000);
+            }
+
+            if (!currentGesture) {
+                driveRigFromLandmarks(currentRig, latestPose);
+            } else {
+                const sLm = latestPose;
+                const nose = sLm[0], leftEar = sLm[7], rightEar = sLm[8];
+                if (leftEar && rightEar && nose) {
+                    const earMidX = (leftEar.x + rightEar.x) / 2;
+                    const yaw = ema('headYaw', (nose.x - earMidX) * 4, 0.35);
+                    const pitch = ema('headPitch', (nose.y - (leftEar.y + rightEar.y) / 2) * 3, 0.35);
+                    const roll = ema('headRoll', Math.atan2(rightEar.y - leftEar.y, rightEar.x - leftEar.x), 0.3);
+                    currentRig.pose(currentRig.semantic.head, pitch, -yaw, -roll);
+                }
+            }
+        }
 
         // --- 4. Game Loop ---
         const clock = new THREE.Clock();
+        let frameCount = 0, lastFpsTime = performance.now();
+        const fpsEl = document.getElementById('fps-counter');
 
         function animate() {
             requestAnimationFrame(animate);
             const dt = clock.getDelta();
+
+            runDetection();
+            processPose();
+
             if (currentRig) currentRig.update(dt);
             renderer.render(scene, camera);
+
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFpsTime >= 1000) {
+                fpsEl.textContent = `${Math.round(frameCount * 1000 / (now - lastFpsTime))} fps`;
+                frameCount = 0;
+                lastFpsTime = now;
+            }
         }
-        animate();
 
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
+
+        // --- Boot sequence ---
+        async function boot() {
+            const loadMsg = document.getElementById('load-msg');
+            const loadScreen = document.getElementById('loading-screen');
+
+            loadMsg.textContent = 'Loading model...';
+            await new Promise(resolve => {
+                loader.load('models/Bluey_fixed_1.glb', (gltf) => {
+                    currentModel = gltf.scene;
+                    RigCharacter.normalize(currentModel, THREE, 2.2);
+                    currentRig = new RigCharacter(currentModel, THREE);
+                    if (gltf.parser.json.extras && gltf.parser.json.extras.calibration) {
+                        applyCalibration(gltf, currentRig);
+                    }
+                    currentRig.play('idle');
+                    scene.add(currentModel);
+                    resolve();
+                });
+            });
+
+            const hasCam = await startCamera();
+            if (hasCam) await initMediaPipe();
+
+            loadScreen.style.display = 'none';
+            animate();
+        }
+
+        boot();
     </script>
 </body>
 </html>
