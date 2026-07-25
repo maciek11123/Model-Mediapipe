@@ -85,7 +85,7 @@
         <button id="btn-wave">Trigger Wave Clip</button>
     </div>
 
-    <!-- Webcam Feed (video only, no canvas overlay) -->
+    <!-- Webcam Feed (video only — no canvas overlay redraw) -->
     <div id="webcam-container">
         <video class="input_video" autoplay playsinline muted></video>
     </div>
@@ -107,17 +107,12 @@
 
     <div id="fps-counter"></div>
 
-    <!-- Modern Three.js via import map -->
-    <script type="importmap">
-    {"imports":{
-        "three":"https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
-        "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
-    }}
-    </script>
+    <!-- Same Three.js r128 as original — no rendering changes -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 
+    <!-- Engine Files -->
     <script type="module">
-        import * as THREE from 'three';
-        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { RigCharacter, CLIPS } from './rig_engine.js';
         import { applyCalibration } from './apply_calibration.js';
 
@@ -161,7 +156,7 @@
             if(s.tail) s.tail.forEach((n, i) => rig.pose(n, 0.1, Math.sin(t * 1.5 - i * 0.7) * 0.04, 0));
         };
 
-        // --- 1. Three.js Setup ---
+        // --- 1. Three.js Setup (identical renderer to original) ---
         const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x87CEEB);
@@ -172,7 +167,7 @@
         const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.outputEncoding = THREE.sRGBEncoding;
         container.appendChild(renderer.domElement);
 
         const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
@@ -186,7 +181,7 @@
         // --- 2. Model Loading Logic ---
         let currentRig = null;
         let currentModel = null;
-        const loader = new GLTFLoader();
+        const loader = new THREE.GLTFLoader();
 
         function loadModel(filename) {
             if (currentModel) {
@@ -196,9 +191,7 @@
 
             loader.load(filename, (gltf) => {
                 currentModel = gltf.scene;
-
                 RigCharacter.normalize(currentModel, THREE, 2.2);
-
                 currentRig = new RigCharacter(currentModel, THREE);
                 if (gltf.parser.json.extras && gltf.parser.json.extras.calibration) {
                     applyCalibration(gltf, currentRig);
@@ -214,9 +207,7 @@
         document.getElementById('btn-m-wave').addEventListener('click', () => { if (currentRig) currentRig.play('wave'); });
         document.getElementById('btn-dance').addEventListener('click', () => { if (currentRig) currentRig.play('dance'); });
 
-        loadModel('models/Bluey_fixed_1.glb');
-
-        // --- Smoothing helpers (EMA instead of raw lerp) ---
+        // --- Smoothing helpers (EMA for cleaner tracking at lower sample rate) ---
         const smoothed = {};
         function ema(key, value, alpha = 0.3) {
             if (!(key in smoothed)) smoothed[key] = value;
@@ -318,7 +309,7 @@
             return null;
         }
 
-        // --- 3. Modern MediaPipe Tasks Vision API (GPU-accelerated) ---
+        // --- 3. Modern MediaPipe Tasks Vision API (GPU-accelerated, throttled) ---
         const videoElement = document.querySelector('.input_video');
         let poseLandmarker = null;
         let latestPose = null;
@@ -386,14 +377,14 @@
             } catch (e) { /* skip frame on error */ }
         }
 
-        function onPoseResult() {
+        function processPose() {
             if (!latestPose || !currentRig) return;
 
             const gesture = detectGesture(latestPose);
             if (gesture && gesture !== currentGesture) {
                 currentRig.play(gesture);
                 currentGesture = gesture;
-                if(gestureTimeout) clearTimeout(gestureTimeout);
+                if (gestureTimeout) clearTimeout(gestureTimeout);
                 gestureTimeout = setTimeout(() => { currentGesture = null; }, 2000);
             }
 
@@ -422,12 +413,11 @@
             const dt = clock.getDelta();
 
             runDetection();
-            onPoseResult();
+            processPose();
 
             if (currentRig) currentRig.update(dt);
             renderer.render(scene, camera);
 
-            // FPS counter (update every 30 frames)
             frameCount++;
             const now = performance.now();
             if (now - lastFpsTime >= 1000) {
@@ -450,7 +440,6 @@
 
             loadMsg.textContent = 'Loading model...';
             await new Promise(resolve => {
-                const origLoad = loadModel;
                 loader.load('models/Bluey_fixed_1.glb', (gltf) => {
                     currentModel = gltf.scene;
                     RigCharacter.normalize(currentModel, THREE, 2.2);
@@ -470,26 +459,6 @@
             loadScreen.style.display = 'none';
             animate();
         }
-
-        // Override loadModel for subsequent character switches
-        document.getElementById('model-select').removeEventListener('change', () => {});
-        document.getElementById('model-select').addEventListener('change', (e) => {
-            const filename = e.target.value;
-            if (currentModel) {
-                currentModel.traverse(c => { if (c.geometry) c.geometry.dispose(); });
-                scene.remove(currentModel);
-            }
-            loader.load(filename, (gltf) => {
-                currentModel = gltf.scene;
-                RigCharacter.normalize(currentModel, THREE, 2.2);
-                currentRig = new RigCharacter(currentModel, THREE);
-                if (gltf.parser.json.extras && gltf.parser.json.extras.calibration) {
-                    applyCalibration(gltf, currentRig);
-                }
-                currentRig.play('idle');
-                scene.add(currentModel);
-            });
-        });
 
         boot();
     </script>
